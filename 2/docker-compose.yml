@@ -1,0 +1,208 @@
+services:
+  jar-downloader:
+    image: curlimages/curl:8.10.1
+    container_name: jar-downloader
+    user: "0:0"
+    environment:
+      JARS_DIR: /jars
+    entrypoint: ["sh", "/download_jars.sh"]
+    volumes:
+      - ./jars:/jars
+      - ./download_jars.sh:/download_jars.sh:ro
+    networks:
+      - etl_network
+
+  postgres:
+    image: postgres:15
+    container_name: postgres
+    environment:
+      POSTGRES_DB: petstore
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin123
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql
+      - ./postgres/load_data.sh:/docker-entrypoint-initdb.d/02-load_data.sh
+      - "./исходные данные:/data"
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - etl_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d petstore"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3
+    container_name: clickhouse
+    environment:
+      CLICKHOUSE_PASSWORD: clickhouse
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    networks:
+      - etl_network
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--password", "clickhouse", "--query", "SELECT 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  cassandra:
+    image: cassandra:4.1
+    container_name: cassandra
+    environment:
+      - CASSANDRA_CLUSTER_NAME=etl_cluster
+      - CASSANDRA_DC=dc1
+      - CASSANDRA_RACK=rack1
+    ports:
+      - "9042:9042"
+    volumes:
+      - cassandra_data:/var/lib/cassandra
+    networks:
+      - etl_network
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'describe cluster'"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+
+  neo4j:
+    image: neo4j:5.15
+    container_name: neo4j
+    environment:
+      - NEO4J_AUTH=neo4j/neo4j_pass
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j_data:/data
+    networks:
+      - etl_network
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7474 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+
+  mongodb:
+    image: mongo:7
+    container_name: mongodb
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=admin
+      - MONGO_INITDB_ROOT_PASSWORD=admin123
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - etl_network
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  valkey:
+    image: valkey/valkey:7.2
+    container_name: valkey
+    ports:
+      - "6379:6379"
+    volumes:
+      - valkey_data:/data
+    networks:
+      - etl_network
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  spark-master:
+    build:
+      context: .
+      dockerfile: ./spark/Dockerfile
+    image: spark-etl:3.5.0
+    container_name: spark-master
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
+    environment:
+      - SPARK_MASTER_HOST=spark-master
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+    volumes:
+      - ./spark:/opt/spark-apps
+      - ./jars:/opt/spark-jars
+    depends_on:
+      jar-downloader:
+        condition: service_completed_successfully
+    networks:
+      - etl_network
+
+  spark-worker:
+    build:
+      context: .
+      dockerfile: ./spark/Dockerfile
+    image: spark-etl:3.5.0
+    container_name: spark-worker
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
+    environment:
+      - SPARK_WORKER_MEMORY=2G
+      - SPARK_WORKER_CORES=2
+    depends_on:
+      spark-master:
+        condition: service_started
+      jar-downloader:
+        condition: service_completed_successfully
+    networks:
+      - etl_network
+
+  jupyter:
+    image: jupyter/pyspark-notebook:latest
+    container_name: jupyter
+    environment:
+      - JUPYTER_ENABLE_LAB=yes
+      - PYSPARK_SUBMIT_ARGS=--master spark://spark-master:7077 --jars /home/jovyan/jars/postgresql-42.7.1.jar,/home/jovyan/jars/clickhouse-jdbc-0.6.0-patch5-shaded.jar pyspark-shell
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./spark:/home/jovyan/work
+      - ./jars:/home/jovyan/jars
+      - "./исходные данные:/home/jovyan/data"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      cassandra:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+      spark-master:
+        condition: service_started
+      spark-worker:
+        condition: service_started
+      jar-downloader:
+        condition: service_completed_successfully
+    networks:
+      - etl_network
+
+networks:
+  etl_network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  clickhouse_data:
+  cassandra_data:
+  neo4j_data:
+  mongodb_data:
+  valkey_data:

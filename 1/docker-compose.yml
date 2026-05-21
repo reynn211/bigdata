@@ -1,0 +1,17 @@
+services:
+  postgres:
+    image: postgres:15
+    container_name: snowflake_lab
+    environment:
+      POSTGRES_DB: snowflake_lab
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./исходные данные:/data
+      - ./init:/docker-entrypoint-initdb.d
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
