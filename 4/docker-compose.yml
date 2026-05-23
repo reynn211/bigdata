@@ -1,0 +1,99 @@
+services:
+  data-prep:
+    image: alpine:latest
+    container_name: data-prep
+    volumes:
+      - ./исходные данные:/src:ro
+      - ./data:/dst
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        mkdir -p /dst
+        cp '/src/MOCK_DATA.csv'     /dst/mock_data_0.csv
+        cp '/src/MOCK_DATA (1).csv' /dst/mock_data_1.csv
+        cp '/src/MOCK_DATA (2).csv' /dst/mock_data_2.csv
+        cp '/src/MOCK_DATA (3).csv' /dst/mock_data_3.csv
+        cp '/src/MOCK_DATA (4).csv' /dst/mock_data_4.csv
+        cp '/src/MOCK_DATA (5).csv' /dst/mock_data_5.csv
+        cp '/src/MOCK_DATA (6).csv' /dst/mock_data_6.csv
+        cp '/src/MOCK_DATA (7).csv' /dst/mock_data_7.csv
+        cp '/src/MOCK_DATA (8).csv' /dst/mock_data_8.csv
+        cp '/src/MOCK_DATA (9).csv' /dst/mock_data_9.csv
+        echo "Copied 10 CSV files to /dst"
+    networks:
+      - etl-network
+
+  postgres:
+    image: postgres:15
+    container_name: postgres
+    environment:
+      POSTGRES_DB: trino_lab
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./data:/data
+      - ./init-postgres:/docker-entrypoint-initdb.d
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - etl-network
+    depends_on:
+      data-prep:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d trino_lab"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    container_name: clickhouse
+    environment:
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: clickhouse
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - ./data:/data
+      - ./init-clickhouse:/docker-entrypoint-initdb.d
+      - ./clickhouse-config/allow_nullable_key.xml:/etc/clickhouse-server/config.d/allow_nullable_key.xml:ro
+      - chdata:/var/lib/clickhouse
+    networks:
+      - etl-network
+    depends_on:
+      data-prep:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--password", "clickhouse", "--query", "SELECT 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  trino:
+    image: trinodb/trino:latest
+    container_name: trino
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./trino/catalog:/etc/trino/catalog
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    networks:
+      - etl-network
+
+volumes:
+  pgdata:
+  chdata:
+
+networks:
+  etl-network:
+    driver: bridge

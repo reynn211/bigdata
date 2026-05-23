@@ -1,0 +1,145 @@
+services:
+  postgres:
+    image: postgres:15
+    container_name: postgres
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin
+      POSTGRES_DB: petstore
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./init:/docker-entrypoint-initdb.d
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d petstore"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - petnet
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+    ports:
+      - "9092:9092"
+    volumes:
+      - kafkadata:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "kafka:9092", "--list"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+    networks:
+      - petnet
+
+  jobmanager:
+    build: ./flink
+    image: flink-petstore:1.18
+    container_name: jobmanager
+    command: jobmanager
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: jobmanager
+        rest.address: jobmanager
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./flink:/opt/flink/usrlib
+    networks:
+      - petnet
+
+  taskmanager:
+    build: ./flink
+    image: flink-petstore:1.18
+    container_name: taskmanager
+    command: taskmanager
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: jobmanager
+        taskmanager.numberOfTaskSlots: 4
+    depends_on:
+      - jobmanager
+    volumes:
+      - ./flink:/opt/flink/usrlib
+    networks:
+      - petnet
+
+  producer:
+    image: python:3.11
+    container_name: producer
+    working_dir: /app
+    command: >
+      bash -c "pip install --no-cache-dir -r requirements.txt && python producer.py"
+    environment:
+      KAFKA_BROKER: kafka:9092
+      KAFKA_TOPIC: mock_data
+      DATA_DIR: /data
+    volumes:
+      - ./producer:/app
+      - "./исходные данные:/data"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks:
+      - petnet
+
+  flink-job:
+    build: ./flink
+    image: flink-petstore:1.18
+    container_name: flink-job
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        set -e
+        echo "Waiting for Kafka, Postgres and JobManager..."
+        sleep 30
+        echo "Submitting PyFlink job to remote JobManager..."
+        /opt/flink/bin/flink run \
+          --detached \
+          --jobmanager jobmanager:8081 \
+          --python /opt/flink/usrlib/flink_job.py
+    environment:
+      KAFKA_BROKER: kafka:9092
+      KAFKA_TOPIC: mock_data
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      PG_DB: petstore
+      PG_USER: admin
+      PG_PASS: admin
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      jobmanager:
+        condition: service_started
+      taskmanager:
+        condition: service_started
+    volumes:
+      - ./flink:/opt/flink/usrlib
+    networks:
+      - petnet
+
+volumes:
+  pgdata:
+  kafkadata:
+
+networks:
+  petnet:
+    driver: bridge
